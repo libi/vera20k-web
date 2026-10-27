@@ -19,7 +19,7 @@
 
 当前支持单机运行，互联网联机通过可选的 WebSocket 网关接入；随机地图及同步截图尚未适配。
 联机需要通过下述服务器入口访问；固定 relay 网关不提供局域网 UDP 广播发现。
-目前 Wasm 构建、网关和大厅测试通过。内置浏览器双页面已实测登录、房间发现、加入、最终设置确认和开局；双方进入地图后均可部署基地车和移动单位，中继确认正在转发比赛数据。完整战局、重赛及公网延迟场景仍未验证。
+当前基于上游提交 `086b5f586`，沿用原版 WASM、WebGPU、音频和存储实现；仅增加 WebSocket 和浏览器 HTTP 传输兼容。原版未修改的 WASM 暂不支持联机，不能直接替换本项目的联机构建。升级后的 WASM、网关、本机大厅和上游大厅测试通过；两个 WebSocket 客户端已通过最新 Rust relay 的票据认证与双向数据报转发测试。真实资源启动已到达引擎 Ready/画布阶段，但浏览器测试连接随后中断，双浏览器开局与完整战局仍未验证。
 音效、单位语音和背景音乐使用导入的游戏音频资源；请允许浏览器播放声音。
 资源会加载到浏览器内存中，所需内存取决于导入的资源量。
 
@@ -32,13 +32,13 @@
 bash server.sh
 ```
 
-然后打开 [本机游戏入口](http://localhost:8788/)，导入游戏资源，通过游戏菜单的 **Internet → Custom Match** 创建账号、登录、建房或加入房间。每位玩家使用独立账号。
+然后打开 [本机游戏入口](http://localhost:8788/)，导入游戏资源，通过游戏菜单的 **Internet → Custom Match** 输入独立玩家名登录、建房或加入房间。新版上游使用临时玩家会话，无需密码或创建账号。
 
 `server.sh` 构建并运行上游原有 Rust UDP relay，同时运行上游大厅逻辑的本机 HTTP/SQLite 宿主和 WebSocket 网关。大厅直接导入子模块的 `LobbyService`/`SqlStore`，没有另写房间或比赛状态机。首次运行在 `.build/server-data/` 创建签名密钥和数据库；不要删除该目录或将其部署为静态资源。Ctrl+C 关闭本次启动的服务。
 
 本机入口默认只监听回环地址。公网部署需 HTTPS/WSS 与允许的游戏 Origin，可只部署网关并连接上游原有 Cloudflare 大厅和匹配的 relay，详见 [网关部署](gateway/README.md) 与 [本机大厅适配](servers/README.md)。`HOST`、`PORT`、`VERA_WEB_ORIGIN` 可配置一体入口；首页“游戏资源 / 帮助”内可填写独立网关地址；留空使用页面同源 `/v1/` 和 `/game/`。静态网页可独立部署，网关需允许该网页 Origin。单机启动不发网关请求、不等待连接；无网关或网关不可达不影响单机。
 
-所有 Web 兼容补丁、覆盖源码、服务器适配和网关均在本目录维护；上游子模块不承载本项目的代码修改，见 [AGENTS.md](AGENTS.md)。
+原版引擎已提供 WASM 功能。本项目仅为浏览器联机保留网络兼容补丁、传输覆盖源码、服务器适配和网关；上游子模块不承载本项目的代码修改，见 [AGENTS.md](AGENTS.md)。
 
 ## 本机存储
 
@@ -48,6 +48,7 @@ bash server.sh
 「更换文件夹」可更新资源缓存，设置和存档保留。
 
 游戏产生的设置、快捷键和存档与资源缓存分开保存，写入后自动持久化。
+新版设置位于 `/saves/profile/`。旧版缓存的顶层 INI 会作为原版迁移的输入恢复，已有新版设置优先。
 首页提供保存状态与重试入口；游戏运行时自动保存，不显示额外网页控件。
 首页可「导出备份」下载用户数据，也可「导入备份」，同名文件会覆盖，其他文件保留。
 备份包含用户数据，不包含游戏资源；导入的数据在下次启动时生效。
@@ -80,8 +81,9 @@ bash web.sh build
 
 `wasm-bindgen-cli` 必须与构建源码中 `Cargo.lock` 的版本一致，脚本会检查并提示。
 当前适配版本为 `0.2.114`；升级引擎后应按提示安装对应版本。
-默认构建会移除 Wasm 的函数名称和编译器元数据，减小站点的体积；
-执行逻辑保持不变，但浏览器报错堆栈不再显示 Wasm 函数名称，无需额外安装工具。
+构建调用原版 `tools/wasm/build.py`，使用 `wasm` 功能与 8 MiB WASM 栈。
+引擎已有的 WASM 实现保持不变，仅应用 `patches/network-compat.patch` 与两个网络传输覆盖文件。
+JS/WASM 取自该构建脚本的输出，不做二次裁剪。
 
 构建入口为 `dist/index.html`，需连同整个 `dist/` 目录部署到 HTTPS 静态托管。
 本地预览可在项目根目录运行：
@@ -120,8 +122,9 @@ bash web.sh package --output ra2yr-web.zip
 
 ```text
 vera20k/                 VERA20k 引擎子模块，固定到已适配的提交
-patches/web-compat.patch 引擎已有文件的 Web 兼容补丁
-overlays/                Web 平台新增源码
+patches/network-compat.patch 仅联机传输所需的兼容补丁
+patches/web-compat.patch 旧版完整浏览器移植（当前不使用）
+overlays/                仅配置中的两个网络文件参与构建，其余为旧版参考
 templates/               启动页面、样式、交互和 IndexedDB 存储脚本
 assets/                  网页图标等资源
 web.config               上游地址、补丁适配基准和覆盖文件清单
@@ -167,7 +170,7 @@ bash web.sh --upstream /path/to/vera20k --ref origin/main build
 
 ## 维护 Web 适配
 
-构建流程为：导出引擎提交 → 校验并应用补丁 → 添加覆盖文件 → 编译 Wasm → 生成静态页面。
+构建流程为：导出引擎提交 → 应用联机补丁与网络覆盖文件 → 原版脚本编译 WASM → 生成静态页面。
 编译在 `.build/engine/` 生成副本中进行，不修改引擎子模块。
 源码副本、缓存和构建锁均保存在 `.build/`；Bash 构建锁串行管理本项目的构建。
 默认关闭增量编译缓存，可通过 `CARGO_INCREMENTAL=1` 覆盖。
@@ -175,16 +178,14 @@ bash web.sh --upstream /path/to/vera20k --ref origin/main build
 相同输入会复用源码副本。补丁冲突时保留上一份成功源码；生成副本有未提交改动时拒绝覆盖。
 更新成功后，旧副本保存在 `.build/previous.*`，确认不再需要后可自行清理。
 
-在保留原始引擎历史的独立工作树中完成兼容适配后，可重新捕获补丁和覆盖文件：
+仅维护网络补丁；不再重新覆盖原版的渲染、音频或文件系统实现。
+历史 `refresh-patch` 命令已移除。升级后运行：
 
 ```bash
-bash web.sh refresh-patch --adapted /path/to/adapted-checkout --base <upstream-commit>
 bash tests/run.sh
 bash web.sh build
 ```
 
-捕获命令只读取适配工作树。新增源文件需加入 `web.config` 的 `OVERLAYS` 清单。
-`.build/engine/` 初始提交已经包含补丁，捕获完整补丁时应以原始引擎提交为基准。
 工作流测试使用临时仓库，不编译 Rust，也不需要网络或游戏资源。
 启动器音频回归测试另需 Node.js：
 

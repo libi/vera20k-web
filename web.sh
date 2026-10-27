@@ -48,7 +48,7 @@ prepare() {
   IDENTITY=$(identity)
   if [[ -d "$ENGINE" ]]; then
     [[ -d "$ENGINE/.git" ]] || fail "Refusing to replace unowned directory: $ENGINE"
-    [[ -z "$(git -C "$ENGINE" status --porcelain --untracked-files=normal)" ]] || fail 'Generated source has edits; save them before preparing.'
+    [[ -z "$(git -C "$ENGINE" status --porcelain --untracked-files=normal -- . ':(exclude)**/.DS_Store' ':(exclude).DS_Store')" ]] || fail 'Generated source has edits; save them before preparing.'
     if [[ -f "$BUILD/source-state" && "$(cat "$BUILD/source-state")" == "$IDENTITY" ]]; then
       printf '%s\n' "$ENGINE"
       return
@@ -60,6 +60,7 @@ prepare() {
     fail 'Could not export upstream source'
   fi
   git -C "$stage" init -q -b feature/web-generated
+  printf '\n.DS_Store\n' >> "$stage/.git/info/exclude"
   if ! git -C "$stage" apply --check "$ROOT/$PATCH_FILE"; then
     rm -rf "$stage"
     fail 'Web patch conflicts with upstream; previous source was preserved.'
@@ -74,7 +75,7 @@ prepare() {
     mkdir -p "$stage/$(dirname "$file")"
     cp "$ROOT/overlays/$file" "$stage/$file"
   done
-  git -C "$stage" add -f --all
+  git -C "$stage" add -f --all -- . ':(exclude)**/.DS_Store' ':(exclude).DS_Store'
   git -C "$stage" -c user.name='VERA20k Web Builder' -c user.email=build@localhost \
     -c commit.gpgsign=false commit -qm "Generated Web source from $REVISION"
   if [[ -d "$ENGINE" ]]; then
@@ -102,9 +103,9 @@ bundle_static() {
   # and regular static hosts can otherwise reuse old module/Wasm responses.
   local version
   version=$(cat "$directory/lobby.js" "$directory/network.js" "$directory/launcher.js" "$directory/storage.js" "$directory/launcher.css" "$directory/pkg/vera20k.js" "$directory/pkg/vera20k_bg.wasm" | git hash-object --stdin)
-  sed -e "s@./launcher.css@./launcher.css?v=$version@g" \
-      -e "s@./lobby.js@./lobby.js?v=$version@g" \
+  sed -e "s@./lobby.js@./lobby.js?v=$version@g" \
       -e "s@./network.js@./network.js?v=$version@g" \
+      -e "s@./launcher.css@./launcher.css?v=$version@g" \
       -e "s@./storage.js@./storage.js?v=$version@g" \
       -e "s@./launcher.js@./launcher.js?v=$version@g" "$directory/index.html" > "$directory/index.versioned"
   mv "$directory/index.versioned" "$directory/index.html"
@@ -122,17 +123,12 @@ build() {
   [[ "$actual" == "wasm-bindgen $expected" ]] || fail "CLI version must match Cargo.lock: expected $expected, got $actual"
   (
     cd "$ENGINE"
-    CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" python3 -m tools.cargo_run -- build -p vera20k --lib --locked \
-      --target wasm32-unknown-unknown --no-default-features --profile fast
+    CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" python3 tools/wasm/build.py
   )
   stage=$(mktemp -d "$BUILD/dist.XXXXXX")
-  local cargo_target
-  cargo_target=$(cd "$ENGINE" && python3 -c 'from pathlib import Path; from tools.cargo_run import build_store, owned_target; root=Path.cwd(); print(owned_target(root, build_store(root)[1]))')
-  # Strip diagnostic metadata before the static site and its cache key are generated.
-  wasm-bindgen --target web --remove-name-section --remove-producers-section \
-    --out-dir "$stage/pkg" "$cargo_target/wasm32-unknown-unknown/fast/vera20k.wasm"
+  cp -R "$ENGINE/target/wasm-dist/pkg" "$stage/pkg"
   bundle_static "$stage"
-  printf 'Upstream: %s\nRevision: %s\nwasm-bindgen: %s\n' "$UPSTREAM_URL" "$REVISION" "$expected" > "$stage/build-info.txt"
+  printf 'Upstream: %s\nRevision: %s\nwasm-bindgen: %s\nEngine: upstream wasm with Web multiplayer transport compatibility\n' "$UPSTREAM_URL" "$REVISION" "$expected" > "$stage/build-info.txt"
   if [[ -d "$DIST" ]]; then rm -rf "$DIST"; fi
   mv "$stage" "$DIST"
   printf 'Ready: %s\n' "$DIST/index.html"
@@ -159,34 +155,14 @@ package() {
   rmdir "$zip_stage"
   printf '%s\n' "$output"
 }
-refresh_patch() {
-  local adapted=$1 base=$2 revision file
-  revision=$(git -C "$adapted" rev-parse --verify "$base^{commit}")
-  local paths=(Cargo.toml Cargo.lock src)
-  for file in "${OVERLAYS[@]}"; do paths+=(":(exclude)$file"); done
-  local pending
-  pending=$(mktemp "$BUILD/patch.XXXXXX")
-  git -C "$adapted" diff --binary "$revision" -- "${paths[@]}" > "$pending"
-  [[ -s "$pending" ]] || fail 'No compatibility changes against selected base'
-  for file in "${OVERLAYS[@]}"; do [[ -f "$adapted/$file" ]] || fail "Missing overlay: $file"; done
-  for file in "${OVERLAYS[@]}"; do
-    mkdir -p "$ROOT/overlays/$(dirname "$file")"
-    cp "$adapted/$file" "$ROOT/overlays/$file"
-  done
-  mv "$pending" "$ROOT/$PATCH_FILE"
-  sed "s/^BASE_REVISION=.*/BASE_REVISION='$revision'/" "$ROOT/web.config" > "$BUILD/config.pending"
-  mv "$BUILD/config.pending" "$ROOT/web.config"
-  printf '%s\n' 'Refreshed patch and overlays; review and rebuild before committing.'
-}
 usage() {
   cat <<'EOF'
 Usage: bash web.sh [--upstream PATH] [--ref REF] COMMAND
-  prepare                         Export upstream and apply Web compatibility
+  prepare                         Export upstream with multiplayer transport compatibility
   build                           Compile and emit the static site in dist/
   bundle                          Rebuild HTML from existing dist/pkg (no Cargo)
   package [--output PATH]          ZIP the fixed public-file allowlist
-  refresh-patch --adapted PATH --base REF
-The output is static. Single-player needs no gateway; multiplayer uses an optional WebSocket gateway.
+The output is static. This uses upstream Wasm support with Web multiplayer transport compatibility.
 EOF
 }
 while [[ $# -gt 0 ]]; do
@@ -206,12 +182,5 @@ case "$command" in
   bundle) bundle_static "$DIST";;
   package)
     if [[ $# == 0 ]]; then package; elif [[ $# == 2 && "$1" == --output ]]; then package "$2"; else fail 'package: expected --output PATH'; fi;;
-  refresh-patch)
-    adapted=; base=
-    while [[ $# -gt 0 ]]; do
-      case "$1" in --adapted) adapted=$2; shift 2;; --base) base=$2; shift 2;; *) fail "Unknown option $1";; esac
-    done
-    [[ -n "$adapted" && -n "$base" ]] || fail 'refresh-patch requires --adapted and --base'
-    refresh_patch "$adapted" "$base";;
   *) usage; fail "Unknown command: $command";;
 esac

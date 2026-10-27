@@ -9,25 +9,29 @@ async function post(url, path, body) {
   return { status: response.status, body: await response.json() };
 }
 
-test('real HTTP account survives a SQLite reopen and signs in with the same identity', async () => {
+test('upstream guest session survives SQLite reopen and releases its name on logout', async () => {
   await mkdir(serverData, { recursive: true, mode: 0o700 });
   const directory = await mkdtemp(join(serverData, 'lobby-test-'));
   let lobby;
   try {
     const options = { port: 0, database: join(directory, 'lobby.sqlite') };
     lobby = await startLobby(options);
-    const account = { nickname: 'LocalTest', password: 'long-local-test-password', protocol: 3 };
-    const created = await post(lobby.url, '/v1/accounts', account);
+    const guest = { nickname: 'LocalTest', protocol: 4 };
+    const created = await post(lobby.url, '/v1/sessions', guest);
     assert.equal(created.status, 200);
-    assert.equal(created.body.nickname, account.nickname);
+    assert.equal(created.body.nickname, guest.nickname);
     assert.equal(typeof created.body.token, 'string');
     await lobby.close(); lobby = null;
     lobby = await startLobby(options);
-    const login = await post(lobby.url, '/v1/sessions', account);
-    assert.equal(login.status, 200);
-    assert.equal(login.body.player_id, created.body.player_id);
-    const wrong = await post(lobby.url, '/v1/sessions', { ...account, password: 'wrong-local-password' });
-    assert.equal(wrong.status, 401);
+    assert.equal((await post(lobby.url, '/v1/sessions', guest)).status, 409);
+    const headers = { authorization: `Bearer ${created.body.token}`, 'content-type': 'application/json' };
+    const channels = await fetch(lobby.url + '/v1/channels?kind=0', { headers });
+    assert.equal(channels.status, 200);
+    const logout = await fetch(lobby.url + '/v1/commands', { method: 'POST', headers,
+      body: JSON.stringify({ request_id: '1', after: 0, operation: 'logout', payload: {} }) });
+    assert.equal(logout.status, 200);
+    assert.equal((await post(lobby.url, '/v1/sessions', guest)).status, 200);
+    assert.equal((await post(lobby.url, '/v1/sessions', { ...guest, password: 'old-format' })).status, 426);
   } finally { if (lobby) await lobby.close(); await rm(directory, { recursive: true }); }
 });
 

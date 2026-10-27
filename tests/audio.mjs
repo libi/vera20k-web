@@ -6,18 +6,20 @@ const source=readFileSync(new URL('../templates/launcher.js',import.meta.url),'u
 function launcher(audioError=false,library=null,users=[],initPromise=null){
  const elements=new Map(), calls=[],writes=[],downloads=[];
  const element=id=>{
-  if(!elements.has(id))elements.set(id,{disabled:false,hidden:false,textContent:'',style:{},classList:{add(){},remove(){},toggle(){},contains(){return false;}},setAttribute(){},addEventListener(){}});
+  if(!elements.has(id))elements.set(id,{disabled:false,hidden:false,textContent:'',style:{},classList:{add(){},remove(){},toggle(){},contains(){return false;}},focus(){},setAttribute(){},addEventListener(){}});
   return elements.get(id);
  };
- const context={Blob,URL:class extends URL{static createObjectURL(blob){downloads.push(blob);return 'blob:fixture';}static revokeObjectURL(){}},window:{addEventListener(){}},VeraStorage:{open:async()=>{},library:async()=>library,users:async()=>users,write:async row=>{writes.push(row);users.push(row);},remove:async()=>{},saveLibrary:async()=>{}},restore_user_file(path){calls.push(`restore:${path}`);},document:{createElement(){return {click(){}};},getElementById:element,addEventListener(){},body:element('body')},navigator:{gpu:{}},MutationObserver:class{observe(){}},init:async()=>{await initPromise;},prepare_audio(){calls.push('audio');if(audioError)throw Error('blocked');},import_file(name){calls.push(name);},start_game(){calls.push('start');},setTimeout,clearTimeout,setInterval:()=>1,clearInterval(){},AbortController,fetch:async()=>({ok:true,headers:{get:()=>null},body:{getReader:()=>({read:async()=>({done:true})})}}),location:{reload(){}}};
+ const context={Blob,URL:class extends URL{static createObjectURL(blob){downloads.push(blob);return 'blob:fixture';}static revokeObjectURL(){}},window:{addEventListener(){}},VeraStorage:{open:async()=>{},library:async()=>library,users:async()=>users,write:async row=>{writes.push(row);users.push(row);},remove:async()=>{},saveLibrary:async()=>{}},set_persistence_callbacks(write,remove){context.persistence={write,remove};},restore_user_file(path){calls.push(`restore:${path}`);},document:{createElement(){return {click(){}};},getElementById:element,addEventListener(){},body:element('body')},navigator:{gpu:{}},MutationObserver:class{observe(){}},init:async()=>{await initPromise;},prepare_audio(){calls.push('audio');if(audioError)throw Error('blocked');},import_file(name){calls.push(name);},start_game(canvas,status){assert.equal(canvas,element('game'));assert.equal(typeof status,'function');status('Ready');calls.push('start');},setTimeout,clearTimeout,setInterval:()=>1,clearInterval(){},AbortController,fetch:async()=>({ok:true,headers:{get:()=>null},body:{getReader:()=>({read:async()=>({done:true})})}}),location:{reload(){}}};
  return {context,elements,calls,writes,downloads,run:async()=>{const api=await runInNewContext(`(async()=>{${source}\nreturn {selectResources};})()`,context);await initPromise;await new Promise(setImmediate);return api;}};
 }
 const resources=['ra2.mix','ra2md.mix','theme.mix','thememd.mix','audio.bag','audio.idx','voice.wav','sound.aud','movies01.mix','movmd03.mix','gamemd.exe'].map(name=>({name,size:1,arrayBuffer:async()=>new ArrayBuffer(1)}));
 {
  const fixture=launcher(), api=await fixture.run();
+ assert.equal(fixture.context.persistence.write,fixture.context.vera20kPersistWrite);
+ assert.equal(fixture.context.persistence.remove,fixture.context.vera20kPersistRemove);
  api.selectResources(resources,'retail');
  await fixture.elements.get('start').onclick();
- assert.deepEqual(fixture.calls,['audio','ra2.mix','ra2md.mix','theme.mix','thememd.mix','audio.bag','audio.idx','voice.wav','sound.aud','start']);
+ assert.deepEqual(fixture.calls,['audio','ra2.mix','ra2md.mix','theme.mix','thememd.mix','audio.bag','audio.idx','voice.wav','sound.aud','movmd03.mix','start']);
 }
 {
  const fixture=launcher(true), api=await fixture.run();
@@ -35,7 +37,7 @@ console.log('PASS: audio opens before resource reads; audio resources retained; 
  assert.equal(fixture.elements.get('start').disabled,false,'cached resources are ready without a folder picker');
  await fixture.elements.get('start').onclick();
  assert.equal(fixture.calls[0],'audio');
- assert.deepEqual(fixture.calls.slice(-2),['restore:/retail/RA2MD.INI','start'],'user settings override imported settings before engine startup');
+ assert.deepEqual(fixture.calls.slice(-2),['RA2MD.INI','start'],'user settings override imported settings before engine startup');
 }
 console.log('PASS: cached resources skip folder selection; user data restores before startup');
 
@@ -64,3 +66,15 @@ console.log('PASS: settings queue copies Wasm memory; user backup contains persi
  assert.equal(fixture.elements.get('start-label').textContent,'开始游戏');
 }
 console.log('PASS: selecting a folder during engine loading shows why start is disabled and enables it after readiness');
+
+{
+ const fixture=launcher(false,null,[
+  {path:'/saves/profile/VERA.INI',bytes:new Uint8Array([1]),modified_ms:123},
+  {path:'/saves/deleted.sav',bytes:new Uint8Array(),modified_ms:123,deleted:true},
+  {path:'/config.toml',bytes:new Uint8Array([2]),modified_ms:123},
+ ]);
+ const api=await fixture.run();api.selectResources(resources,'retail');
+ await fixture.elements.get('start').onclick();
+ assert.deepEqual(fixture.calls.slice(-2),['restore:/saves/profile/VERA.INI','start']);
+}
+console.log('PASS: original upstream persistence callbacks, canvas/status API, and saves-only restore schema');

@@ -1,4 +1,4 @@
-import init, {import_file, prepare_audio, restore_user_file, start_game} from './pkg/vera20k.js';
+import init, {import_file, prepare_audio, restore_user_file, set_persistence_callbacks, start_game} from './pkg/vera20k.js';
 const $=id=>document.getElementById(id);
 const status=$('status'), button=$('start'), files=$('files');
 const gatewayInput=$('gateway-address'), gatewayStatus=$('gateway-status');
@@ -79,7 +79,8 @@ $('backup-file').onchange=async()=>{
 };
 const droppedPaths=new WeakMap();
 const allowed=/\.(mix|mmx|yro|ini|map|mpr|yrm|csf|fnt|pal|shp|vxl|hva|tmp|vpl|pcx|bag|idx|wav|aud)$/i;
-const excluded=/^(movies\d*|movmd\d*)\.mix$/i;
+// Upstream's stock digital startup mounts media 03 even before movie playback.
+const excluded=name=>/^(movies\d*|movmd\d*)\.mix$/i.test(name)&&!/^(movies|movmd)03\.mix$/i.test(name);
 const relativePath=file=>droppedPaths.get(file) ?? (file.webkitRelativePath ? file.webkitRelativePath.split('/').slice(1).join('/') : file.name);
 const sizeLabel=bytes=>bytes>=1024**3 ? `${(bytes/1024**3).toFixed(1)} GB` : `${Math.max(1,Math.round(bytes/1024**2))} MB`;
 function syncButton(){
@@ -104,13 +105,14 @@ function progress(value,detail){
 function enterGame(){
  if(failed)return;
  busy=false;document.body.classList.add('playing');
- const canvas=$('game').querySelector('canvas');if(canvas)canvas.focus({preventScroll:true});
+ $('game').focus({preventScroll:true});
 }
-new MutationObserver(()=>{
- const message=status.textContent||'';
- if(message.startsWith('已启动'))enterGame();
- else if(/^(启动失败|资源加载失败|运行错误)/.test(message))fail('游戏未能正常启动，请检查游戏资源后重试。',message);
-}).observe(status,{childList:true,characterData:true,subtree:true});
+function engineStatus(message){
+ status.textContent=message;
+ if(message==='Ready')enterGame();
+ else if(message==='Starting engine')feedback('正在启动原版引擎…');
+ else fail('游戏未能正常启动，请查看详情。',message);
+}
 window.addEventListener('error',event=>{if(busy||document.body.classList.contains('playing'))fail('游戏运行出错，请查看错误详情。',event.message||String(event.error));});
 window.addEventListener('unhandledrejection',event=>{if(busy||document.body.classList.contains('playing'))fail('游戏运行出错，请查看错误详情。',String(event.reason));});
 $('retry').onclick=()=>{if(!ready){failed=false;$('retry').hidden=true;$('error-details').hidden=true;void prepareEngine();}else location.reload();};
@@ -118,7 +120,7 @@ function chooseFolder(){files.value='';files.click();}
 $('choose-folder').onclick=chooseFolder;$('change-folder').onclick=chooseFolder;
 function selectResources(chosen,folderName){
  selectionRevision++;
- const keep=chosen.filter(file=>allowed.test(file.name)&&!excluded.test(file.name));
+ const keep=chosen.filter(file=>allowed.test(file.name)&&!excluded(file.name));
  const rootNames=new Set(keep.filter(file=>!relativePath(file).includes('/')).map(file=>file.name.toLowerCase()));
  if(!rootNames.has('ra2.mix')||!rootNames.has('ra2md.mix')){
   selected=[];$('choose-folder').hidden=false;$('folder-selected').hidden=true;
@@ -188,7 +190,13 @@ button.onclick=async()=>{
   // start from retail defaults while the durable settings database is opening.
   progress(95,'正在恢复设置与存档…');
   await store.open();storageAvailable=true;
-  for(const row of await store.users())restore_user_file(row.path,row.bytes,row.modified_ms,!!row.deleted);
+  for(const row of await store.users()){
+   if(row.deleted)continue;
+   // Restore old settings as retail import sources; upstream owns the one-time
+   // migration into VERA.INI. New /saves/profile records take precedence there.
+   if(/^\/retail\/[^/]+\.ini$/i.test(row.path))import_file(row.path.slice('/retail/'.length),row.bytes);
+   else if(row.path.startsWith('/saves/'))restore_user_file(row.path,row.bytes,row.modified_ms);
+  }
   $('import-data').disabled=true;
   if(storageAvailable&&!cachedSelection){
    // Cache independently: the engine must never wait for a large disk write.
@@ -200,7 +208,7 @@ button.onclick=async()=>{
     navigator.storage?.persist?.().catch(()=>{});
    }).catch(error=>storageStatus(`资源缓存失败：${error.message}。下次请重新选择目录。`,true));
   }
-  start_game();
+  start_game($('game'),engineStatus);
  }catch(error){fail('读取或启动失败，请重新加载后再试。',String(error));}
 };
 
@@ -237,6 +245,7 @@ async function prepareEngine(){
   const bytes=await engineBytes();
   compiling=true;feedback('正在准备游戏引擎…');$('progress-area').hidden=true;
   await init({module_or_path:bytes});
+  set_persistence_callbacks(globalThis.vera20kPersistWrite,globalThis.vera20kPersistRemove);
   ready=true;failed=false;
   $('environment').className='environment ready';$('environment-label').textContent='浏览器已就绪';
   feedback(selected.length?'资源已就绪，点击「开始游戏」。':'请选择游戏目录；如果正在恢复缓存，也可以稍候。');
